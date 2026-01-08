@@ -60,6 +60,7 @@ Make sure you have the following installed:
 ```bash
 git clone https://github.com/Kartik-324/RepoVision-AI.git
 cd github-mermaid-generator
+
 2️⃣ Backend Setup
 bash
 Copy code
@@ -73,11 +74,13 @@ env
 Copy code
 OPENAI_API_KEY=your_openai_api_key
 GITHUB_TOKEN=your_github_token
+
 3️⃣ Frontend Setup
 bash
 Copy code
 cd ../frontend
 pip install -r requirements.txt
+
 4️⃣ Run the Application
 Backend Server
 bash
@@ -87,6 +90,8 @@ Frontend (Streamlit)
 bash
 Copy code
 streamlit run app.py
+
+
 🌐 Access URLs
 Frontend UI: http://localhost:8501
 
@@ -138,6 +143,7 @@ env
 Copy code
 OPENAI_API_KEY=your_openai_api_key
 GITHUB_TOKEN=your_github_token
+
 🐛 Troubleshooting
 Backend not starting → Check .env and dependencies
 
