@@ -1,6 +1,6 @@
-# 🚀 RepoVision_AI
+# 🚀 GitHub-Mermaid Diagram Generator
 
-RepoVision_AI is an AI-powered tool that converts any GitHub repository into **clear, interactive, and visually rich Mermaid diagrams**.  
+GitHub-Mermaid Diagram Generator is an AI-powered tool that converts any GitHub repository into **clear, interactive, and visually rich Mermaid diagrams**.  
 It helps developers, students, and teams quickly understand complex codebases by visualizing architecture, workflows, database schemas, and system interactions.
 
 Using advanced Large Language Models, the system deeply analyzes repositories and generates accurate diagrams that can be rendered, customized, and downloaded in real time.
