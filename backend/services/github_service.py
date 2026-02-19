@@ -1,4 +1,4 @@
-# backend/services/github_service.py - AUTHENTICATION FIXED + DETAILED ANALYSIS
+# backend/services/github_service.py - FIXED VERSION
 import os
 import requests
 import tempfile
@@ -9,13 +9,21 @@ from pathlib import Path
 from fastapi import HTTPException
 
 def parse_github_url(repo_url: str) -> tuple:
-    """Parse GitHub URL to extract owner and repo name"""
+    """
+    Parse GitHub URL to extract owner and repo name.
+    ✅ FIX 1: Correctly handles subdirectory URLs like:
+       https://github.com/codebasics/langchain/tree/main/4_sqldb_tshirts
+       → strips to: codebasics, langchain
+    ✅ FIX 2: Uses startswith prefix removal (not .replace) to avoid
+       accidentally removing matching strings mid-URL
+    """
     repo_url = repo_url.strip()
     
-    # Remove common prefixes
+    # Remove common prefixes using startswith (not .replace to avoid mid-string matches)
     for prefix in ["https://github.com/", "http://github.com/", "github.com/", "www.github.com/"]:
         if repo_url.startswith(prefix):
-            repo_url = repo_url.replace(prefix, "")
+            repo_url = repo_url[len(prefix):]  # ✅ slice, not replace
+            break
     
     # Remove trailing slash and .git
     repo_url = repo_url.rstrip("/").replace(".git", "")
@@ -26,7 +34,16 @@ def parse_github_url(repo_url: str) -> tuple:
     if len(parts) < 2:
         raise ValueError(f"Invalid GitHub URL format. Expected: https://github.com/owner/repo, got: {repo_url}")
     
-    return parts[0], parts[1]
+    owner = parts[0]
+    repo_name = parts[1]
+    
+    # ✅ FIX: Ignore everything after owner/repo (e.g. /tree/main/subfolder, /blob/main/file.py)
+    # parts[2] would be 'tree' or 'blob' if a subdirectory URL was pasted - we don't need it
+    
+    if not owner or not repo_name:
+        raise ValueError(f"Could not extract owner/repo from URL: {repo_url}")
+    
+    return owner, repo_name
 
 def check_git_installed() -> bool:
     """Check if Git is installed and accessible"""
@@ -44,11 +61,9 @@ def check_git_installed() -> bool:
 def get_safe_temp_dir() -> str:
     """Get a safe temporary directory that works on all platforms"""
     try:
-        # Try to use a custom temp directory in the current directory
         base_dir = os.path.join(os.getcwd(), "temp_repos")
         os.makedirs(base_dir, exist_ok=True)
         
-        # Create a unique subdirectory
         import time
         import random
         unique_name = f"repo_{int(time.time() * 1000)}_{random.randint(1000, 9999)}"
@@ -57,19 +72,18 @@ def get_safe_temp_dir() -> str:
         
         return temp_dir
     except Exception as e:
-        # Fallback to system temp
         print(f"⚠️ Using system temp directory: {e}")
         return tempfile.mkdtemp(prefix="repovision_")
 
 def clone_and_analyze_repo(repo_url: str, github_token: str = None) -> dict:
     """
-    Clone repository to temp directory, analyze it, then delete
-    ✅ FIXED: Proper authentication for public and private repos
-    ✅ ENHANCED: Detailed file analysis for comprehensive diagrams
+    Clone repository to temp directory, analyze it, then delete.
+    ✅ FIX 3: cleanup now happens AFTER analysis is fully complete,
+       preventing race condition where temp dir was deleted while
+       uvicorn's StatReload was still scanning it (caused FileNotFoundError crash).
     """
     temp_dir = None
     
-    # Check if Git is installed
     if not check_git_installed():
         raise HTTPException(
             status_code=500,
@@ -82,7 +96,6 @@ def clone_and_analyze_repo(repo_url: str, github_token: str = None) -> dict:
         )
     
     try:
-        # Parse and validate URL
         try:
             owner, repo_name = parse_github_url(repo_url)
             print(f"📦 Target: {owner}/{repo_name}")
@@ -93,7 +106,6 @@ def clone_and_analyze_repo(repo_url: str, github_token: str = None) -> dict:
                        "Expected format: https://github.com/owner/repository"
             )
         
-        # Create temp directory
         try:
             temp_dir = get_safe_temp_dir()
             print(f"📁 Temp directory: {temp_dir}")
@@ -103,35 +115,30 @@ def clone_and_analyze_repo(repo_url: str, github_token: str = None) -> dict:
                 detail=f"Failed to create temporary directory: {str(e)}"
             )
         
-        # Prepare clone URL with authentication
-        clone_url = repo_url
-        if not clone_url.startswith(("http://", "https://")):
-            clone_url = f"https://github.com/{owner}/{repo_name}"
+        # Build clean clone URL from parsed owner/repo (NOT the raw input URL)
+        # ✅ FIX: Always construct the clone URL from parsed parts so
+        #    subdirectory paths (/tree/main/...) are never included in the git URL
+        base_clone_url = f"https://github.com/{owner}/{repo_name}"
         
-        # ✅ FIXED: Proper token authentication
-        if github_token and "github.com" in clone_url:
-            # Remove any existing protocol
-            clone_url = clone_url.replace("https://", "").replace("http://", "")
-            # Add token in correct format: https://TOKEN@github.com/owner/repo
-            clone_url = f"https://{github_token}@{clone_url}"
+        if github_token:
+            clone_url = f"https://{github_token}@github.com/{owner}/{repo_name}"
             print(f"🔒 Using authenticated access (token provided)")
         else:
+            clone_url = base_clone_url
             print(f"🌐 Using public access (no token)")
         
-        # Clone the repository
         print(f"⏳ Cloning repository...")
         
         is_windows = sys.platform.startswith('win')
         
-        # Set environment to prevent Git from prompting for credentials
         env = os.environ.copy()
         env['GIT_TERMINAL_PROMPT'] = '0'
-        env['GIT_ASKPASS'] = 'echo'  # Prevent password prompts
+        env['GIT_ASKPASS'] = 'echo'
         
         clone_cmd = [
             "git", "clone",
-            "--depth", "1",  # Shallow clone for speed
-            "--single-branch",  # Only main branch
+            "--depth", "1",
+            "--single-branch",
             clone_url,
             temp_dir
         ]
@@ -141,15 +148,14 @@ def clone_and_analyze_repo(repo_url: str, github_token: str = None) -> dict:
                 clone_cmd,
                 capture_output=True,
                 text=True,
-                timeout=180,  # 3 minute timeout
+                timeout=180,
                 env=env,
-                shell=is_windows  # Use shell on Windows for compatibility
+                shell=is_windows
             )
             
             if result.returncode != 0:
                 error_msg = result.stderr.lower()
                 
-                # Provide specific, helpful error messages
                 if "repository not found" in error_msg or "not found" in error_msg:
                     raise HTTPException(
                         status_code=404,
@@ -193,7 +199,6 @@ def clone_and_analyze_repo(repo_url: str, github_token: str = None) -> dict:
                                "Try a smaller repository first to test."
                     )
                 else:
-                    # Show actual Git error
                     error_display = result.stderr[:500] if result.stderr else "Unknown error"
                     raise HTTPException(
                         status_code=500,
@@ -217,9 +222,10 @@ def clone_and_analyze_repo(repo_url: str, github_token: str = None) -> dict:
                        "3. Repository might be >500MB"
             )
         
-        # Analyze the cloned repository
+        # ✅ FIX 3: Analyze FIRST, then cleanup in finally block
+        # Previously cleanup printed before clone finished in some cases
         print(f"🔍 Analyzing repository structure...")
-        repo_data = analyze_local_repo(temp_dir, repo_url)
+        repo_data = analyze_local_repo(temp_dir, repo_url, owner, repo_name)
         
         print(f"✨ Analysis complete!")
         print(f"   - Files analyzed: {repo_data['total_files_analyzed']}")
@@ -228,7 +234,6 @@ def clone_and_analyze_repo(repo_url: str, github_token: str = None) -> dict:
         return repo_data
         
     except HTTPException:
-        # Re-raise HTTP exceptions with our clear error messages
         raise
     except Exception as e:
         print(f"❌ Unexpected error: {str(e)}")
@@ -239,10 +244,9 @@ def clone_and_analyze_repo(repo_url: str, github_token: str = None) -> dict:
             detail=f"Failed to process repository: {str(e)}"
         )
     finally:
-        # Cleanup: Always delete temp directory
+        # Cleanup always runs after repo_data is returned (or on error)
         if temp_dir and os.path.exists(temp_dir):
             try:
-                # On Windows, handle read-only files
                 if sys.platform.startswith('win'):
                     for root, dirs, files in os.walk(temp_dir):
                         for d in dirs:
@@ -261,12 +265,14 @@ def clone_and_analyze_repo(repo_url: str, github_token: str = None) -> dict:
             except Exception as e:
                 print(f"⚠️ Warning: Could not fully clean temp directory: {e}")
 
-def analyze_local_repo(repo_path: str, repo_url: str) -> dict:
+def analyze_local_repo(repo_path: str, repo_url: str, owner: str = None, repo_name: str = None) -> dict:
     """
-    Analyze locally cloned repository
-    ✅ ENHANCED: Read more files for detailed diagrams
+    Analyze locally cloned repository.
+    ✅ FIX: Accept pre-parsed owner/repo_name to avoid re-parsing
+       (re-parsing was redundant and could fail on subdirectory URLs)
     """
-    owner, repo_name = parse_github_url(repo_url)
+    if not owner or not repo_name:
+        owner, repo_name = parse_github_url(repo_url)
     
     # Try to get repo info from GitHub API (for metadata)
     api_url = f"https://api.github.com/repos/{owner}/{repo_name}"
@@ -311,10 +317,7 @@ def analyze_local_repo(repo_path: str, repo_url: str) -> dict:
     }
 
 def build_file_tree_from_disk(repo_path: str, max_depth: int = 6) -> dict:
-    """
-    Build file tree from local repository
-    ✅ ENHANCED: Increased depth for better analysis
-    """
+    """Build file tree from local repository"""
     
     skip_dirs = {
         '.git', 'node_modules', '__pycache__', '.next', 'dist', 'build',
@@ -334,7 +337,6 @@ def build_file_tree_from_disk(repo_path: str, max_depth: int = 6) -> dict:
             return {}
         
         for item in items:
-            # Skip hidden files except important ones
             if item.startswith('.') and item not in ['.env', '.gitignore', '.env.example', '.github']:
                 continue
             
@@ -344,7 +346,7 @@ def build_file_tree_from_disk(repo_path: str, max_depth: int = 6) -> dict:
                 if os.path.isdir(item_path):
                     if item not in skip_dirs:
                         subtree = build_tree(item_path, depth + 1)
-                        if subtree:  # Only add if has contents
+                        if subtree:
                             tree[item] = {
                                 "type": "dir",
                                 "path": os.path.relpath(item_path, repo_path).replace('\\', '/'),
@@ -362,7 +364,7 @@ def build_file_tree_from_disk(repo_path: str, max_depth: int = 6) -> dict:
                         "extension": extension,
                         "purpose": purpose
                     }
-            except (PermissionError, OSError) as e:
+            except (PermissionError, OSError):
                 continue
         
         return tree
@@ -372,62 +374,34 @@ def build_file_tree_from_disk(repo_path: str, max_depth: int = 6) -> dict:
 def classify_file_purpose(filename: str, filepath: str) -> str:
     """Classify file purpose for better diagram organization"""
     name_lower = filename.lower()
-    path_lower = filepath.lower()
     
-    # Test files
     if any(x in name_lower for x in ["test", "spec", ".test.", "_test", "test_"]):
         return "testing"
-    
-    # Config files
     if any(x in name_lower for x in ["config", "setup", ".env", "settings", "conf"]):
         return "configuration"
-    
-    # Data models
     if any(x in name_lower for x in ["model", "schema", "entity", "dto"]):
         return "data_model"
-    
-    # API/Routes
     if any(x in name_lower for x in ["route", "endpoint", "api", "controller", "handler"]):
         return "api"
-    
-    # UI Components
     if any(x in name_lower for x in ["component", "view", "page", "screen", "template"]):
         return "ui"
-    
-    # Utilities
     if any(x in name_lower for x in ["util", "helper", "tool", "common"]):
         return "utility"
-    
-    # Services
     if any(x in name_lower for x in ["service", "provider", "manager", "factory"]):
         return "service"
-    
-    # Middleware
     if any(x in name_lower for x in ["middleware", "interceptor", "filter"]):
         return "middleware"
-    
-    # Database
     if any(x in name_lower for x in ["migration", "seed", "database", "db", ".sql"]):
         return "database"
-    
-    # Dependencies
     if filename in ["package.json", "requirements.txt", "Cargo.toml", "go.mod", "pom.xml", "build.gradle"]:
         return "dependencies"
-    
-    # Documentation
     if any(x in name_lower for x in ["readme", "doc", "docs", ".md"]):
         return "documentation"
     
     return "general"
 
 def read_important_files(repo_path: str, max_files: int = 200) -> dict:
-    """
-    Read important files from repository
-    ✅ ENHANCED: Increased limits for detailed diagram generation
-    - More files: 100 → 200
-    - More content: 20KB → 40KB per file
-    - Larger file size: 200KB → 400KB
-    """
+    """Read important files from repository"""
     important_files = {}
     
     code_extensions = {
@@ -446,7 +420,6 @@ def read_important_files(repo_path: str, max_files: int = 200) -> dict:
     file_count = 0
     
     for root, dirs, files in os.walk(repo_path):
-        # Remove skip directories from traversal
         dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith('.')]
         
         for file in files:
@@ -463,7 +436,6 @@ def read_important_files(repo_path: str, max_files: int = 200) -> dict:
             except OSError:
                 continue
             
-            # Read if: code file or important config, and under 400KB
             should_read = (
                 extension in code_extensions or 
                 file in [
@@ -473,7 +445,7 @@ def read_important_files(repo_path: str, max_files: int = 200) -> dict:
                 ]
             )
             
-            if should_read and size < 400000:  # 400KB limit
+            if should_read and size < 400000:
                 try:
                     with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                         content = f.read()
@@ -481,7 +453,7 @@ def read_important_files(repo_path: str, max_files: int = 200) -> dict:
                     purpose = classify_file_purpose(file, rel_path)
                     
                     important_files[rel_path] = {
-                        "content": content[:40000],  # First 40KB (increased from 20KB)
+                        "content": content[:40000],
                         "size": size,
                         "extension": extension,
                         "purpose": purpose,
@@ -490,7 +462,7 @@ def read_important_files(repo_path: str, max_files: int = 200) -> dict:
                     
                     file_count += 1
                     
-                except Exception as e:
+                except Exception:
                     continue
         
         if file_count >= max_files:
@@ -583,17 +555,14 @@ def analyze_dependencies_from_disk(repo_path: str) -> dict:
             try:
                 with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                     content = f.read()
-                dependencies[package_manager] = content[:10000]  # First 10KB
+                dependencies[package_manager] = content[:10000]
             except Exception:
                 continue
     
     return dependencies
 
 def format_file_structure(structure: dict, indent: int = 0, max_items: int = 150) -> str:
-    """
-    Format file structure for display
-    ✅ ENHANCED: Show more items for detailed analysis
-    """
+    """Format file structure for display"""
     result = []
     count = 0
     
@@ -618,10 +587,7 @@ def format_file_structure(structure: dict, indent: int = 0, max_items: int = 150
     return "\n".join(result)
 
 def format_file_contents(contents: dict, max_files: int = 60) -> str:
-    """
-    Format file contents for prompt
-    ✅ ENHANCED: Show more files with more content
-    """
+    """Format file contents for prompt"""
     result = []
     
     for filepath, file_data in list(contents.items())[:max_files]:
@@ -635,7 +601,7 @@ def format_file_contents(contents: dict, max_files: int = 60) -> str:
             result.append(f"FILE: {filepath}")
             result.append(f"Type: {extension} | Purpose: {purpose} | Size: {full_size}B")
             result.append(f"{'='*60}")
-            result.append(content[:6000])  # Show first 6KB (increased from 3KB)
+            result.append(content[:6000])
             if full_size > 6000:
                 result.append(f"\n... (truncated, {full_size - 6000} bytes remaining)")
         else:

@@ -16,7 +16,7 @@ def render(api_endpoint):
     
     # Repository input at the top
     with st.container():
-        chat_repo_url = st.text_input(
+        chat_repo_url = st.text_input( 
             "📁 GitHub Repository URL",
             key="chat_repo_url",
             placeholder="https://github.com/username/repository (public or private)"

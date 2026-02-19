@@ -4,13 +4,25 @@ import re
 from dotenv import load_dotenv
 load_dotenv()
 from langchain_openai import ChatOpenAI
-from langchain.messages import HumanMessage, SystemMessage, AIMessage
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
+
+# ✅ FIX: Token budget constants
+# gpt-4o has 128k context. We reserve:
+#   - ~3k  for the question + chat history
+#   - ~4k  for the response (max_tokens)
+#   - ~121k for our system prompt (context)
+# Each char ≈ 0.25 tokens, so 121k tokens ≈ 484k chars
+MAX_CONTEXT_CHARS = 480_000
+# File contents are the biggest culprit - cap that section separately
+MAX_FILE_CONTENTS_CHARS = 300_000
+MAX_FILES_IN_PROMPT = 40
 
 def get_llm():
-    """Initialize LLM with settings optimized for consistency"""
+    """Initialize LLM"""
     return ChatOpenAI(
         model="gpt-4o",
-        temperature=0.05,  # Very low for consistency
+        temperature=0.05,
+        max_tokens=4096,
         openai_api_key=os.getenv("OPENAI_API_KEY")
     )
 
@@ -18,17 +30,14 @@ def validate_diagram_completeness(mermaid_code: str, repo_data: dict) -> tuple:
     """Validate that diagram is comprehensive enough"""
     issues = []
     
-    # Count nodes/components
     lines = mermaid_code.split('\n')
     node_count = 0
     for line in lines:
         if '[' in line and ']' in line and not line.strip().startswith('%%'):
             node_count += 1
     
-    # Get repo size
     file_count = len(repo_data.get('file_contents', {}))
     
-    # Enforce minimum nodes based on repo size
     if file_count < 20:
         min_nodes = 15
     elif file_count < 50:
@@ -39,17 +48,9 @@ def validate_diagram_completeness(mermaid_code: str, repo_data: dict) -> tuple:
     if node_count < min_nodes:
         issues.append(f"Diagram too simple: only {node_count} components (need {min_nodes}+)")
     
-    # Check for subgraphs (organization)
     has_subgraphs = 'subgraph' in mermaid_code.lower()
     if not has_subgraphs and file_count > 10:
         issues.append("Missing organization: no subgraphs used")
-    
-    # Check for generic names (placeholders)
-    generic_names = ['service', 'component', 'module', 'handler', 'controller', 'utility']
-    code_lower = mermaid_code.lower()
-    for generic in generic_names:
-        if f'[{generic}]' in code_lower or f'{generic}[' in code_lower:
-            issues.append(f"Found generic placeholder: '{generic}'")
     
     return len(issues) == 0, issues
 
@@ -76,7 +77,6 @@ def validate_mermaid_syntax(mermaid_code: str) -> tuple:
         line = line.strip()
         if not line or line.startswith('%%'):
             continue
-        
         if line.startswith('subgraph') or line == 'end':
             continue
         
@@ -112,13 +112,11 @@ def fix_mermaid_syntax(mermaid_code: str) -> str:
             fixed_lines.append(line)
             continue
         
-        # Fix arrow syntax
         line = re.sub(r'-{4,}>', '-->', line)
         line = re.sub(r'\.{4,}>', '-..->', line)
         line = line.replace('===>', '-->')
         line = line.replace('....>', '-..->')
         
-        # Fix node IDs with spaces - only before brackets
         if '[' in line or '(' in line or '-->' in line or '-..->' in line:
             parts = line.split('[', 1)
             if len(parts) > 1:
@@ -127,29 +125,17 @@ def fix_mermaid_syntax(mermaid_code: str) -> str:
                 line = before_bracket + '[' + parts[1]
         
         line = re.sub(r';+', ';', line)
-        
         fixed_lines.append(line)
     
     return '\n'.join(fixed_lines)
 
 def extract_detailed_repo_components(repo_data: dict) -> dict:
-    """Extract and categorize ALL components from repository"""
-    
+    """Extract and categorize components from repository"""
     components = {
-        'frontend_files': [],
-        'backend_files': [],
-        'services': [],
-        'routes': [],
-        'models': [],
-        'components': [],
-        'pages': [],
-        'utils': [],
-        'config_files': [],
-        'database_files': [],
-        'api_endpoints': [],
-        'dependencies': [],
-        'folders': [],
-        'all_files': []
+        'frontend_files': [], 'backend_files': [], 'services': [],
+        'routes': [], 'models': [], 'components': [], 'pages': [],
+        'utils': [], 'config_files': [], 'database_files': [],
+        'api_endpoints': [], 'dependencies': [], 'folders': [], 'all_files': []
     }
     
     file_structure = repo_data.get('file_structure', {})
@@ -158,254 +144,183 @@ def extract_detailed_repo_components(repo_data: dict) -> dict:
         if isinstance(obj, dict):
             for key, value in obj.items():
                 current_path = f"{path}/{key}" if path else key
-                
                 if isinstance(value, dict):
                     components['folders'].append(current_path)
                     traverse_structure(value, current_path)
                 else:
                     components['all_files'].append(current_path)
-                    
-                    if 'frontend' in current_path.lower() or 'client' in current_path.lower():
-                        components['frontend_files'].append(current_path)
-                    if 'backend' in current_path.lower() or 'server' in current_path.lower():
-                        components['backend_files'].append(current_path)
-                    if 'service' in current_path.lower():
-                        components['services'].append(current_path)
-                    if 'route' in current_path.lower() or 'router' in current_path.lower():
-                        components['routes'].append(current_path)
-                    if 'model' in current_path.lower() or 'schema' in current_path.lower():
-                        components['models'].append(current_path)
-                    if 'component' in current_path.lower():
-                        components['components'].append(current_path)
-                    if 'page' in current_path.lower() or 'view' in current_path.lower():
-                        components['pages'].append(current_path)
-                    if 'util' in current_path.lower() or 'helper' in current_path.lower():
-                        components['utils'].append(current_path)
+                    p = current_path.lower()
+                    if 'frontend' in p or 'client' in p: components['frontend_files'].append(current_path)
+                    if 'backend' in p or 'server' in p: components['backend_files'].append(current_path)
+                    if 'service' in p: components['services'].append(current_path)
+                    if 'route' in p or 'router' in p: components['routes'].append(current_path)
+                    if 'model' in p or 'schema' in p: components['models'].append(current_path)
+                    if 'component' in p: components['components'].append(current_path)
+                    if 'page' in p or 'view' in p: components['pages'].append(current_path)
+                    if 'util' in p or 'helper' in p: components['utils'].append(current_path)
                     if current_path.endswith(('.json', '.yaml', '.yml', '.env', '.toml', '.ini')):
                         components['config_files'].append(current_path)
-                    if 'database' in current_path.lower() or 'db' in current_path.lower() or current_path.endswith('.sql'):
+                    if 'database' in p or '/db' in p or current_path.endswith('.sql'):
                         components['database_files'].append(current_path)
     
     traverse_structure(file_structure)
     
-    # Extract dependencies
     file_contents = repo_data.get('file_contents', {})
     for filename, content in file_contents.items():
         if 'requirements.txt' in filename or 'package.json' in filename or 'pyproject.toml' in filename:
             if isinstance(content, str):
-                lines = content.split('\n')
-                for line in lines[:50]:
+                for line in content.split('\n')[:50]:
                     line = line.strip()
                     if line and not line.startswith('#'):
                         components['dependencies'].append(line.split('==')[0].split('>=')[0].strip())
     
     return components
 
+def build_trimmed_file_contents(repo_data: dict, max_chars: int = MAX_FILE_CONTENTS_CHARS, max_files: int = MAX_FILES_IN_PROMPT) -> str:
+    """
+    ✅ FIX: Build file contents section with a hard character cap.
+    Prioritizes important files (api, service, model, config) over general ones.
+    """
+    from .github_service import format_file_contents
+
+    file_contents = repo_data.get('file_contents', {})
+    total_files = len(file_contents)
+
+    if total_files == 0:
+        return "(no files)"
+
+    # Priority order for which files to include
+    priority_purposes = ['api', 'service', 'data_model', 'middleware', 'configuration']
+    priority = {}
+    others = {}
+
+    for path, data in file_contents.items():
+        purpose = data.get('purpose', '') if isinstance(data, dict) else ''
+        if purpose in priority_purposes:
+            priority[path] = data
+        else:
+            others[path] = data
+
+    # Build the trimmed dict: priority first, then fill with others up to max_files
+    trimmed = dict(list(priority.items())[:max_files])
+    remaining_slots = max_files - len(trimmed)
+    if remaining_slots > 0:
+        trimmed.update(dict(list(others.items())[:remaining_slots]))
+
+    if total_files > max_files:
+        print(f"   ⚠️ Trimmed file contents: {total_files} → {len(trimmed)} files (token budget)")
+
+    # Format and apply char cap
+    formatted = format_file_contents(trimmed, max_files=max_files)
+    if len(formatted) > max_chars:
+        formatted = formatted[:max_chars] + f"\n\n... [TRUNCATED: showing {max_files}/{total_files} files to stay within token limit]"
+
+    return formatted
+
 def analyze_repo_with_chat(repo_data: dict, question: str, chat_history: list = None) -> dict:
-    """Analyze repository with ENFORCED comprehensive diagram generation"""
+    """
+    Analyze repository with comprehensive diagram generation.
+    ✅ FIX: Hard token budget enforced - context never exceeds ~128k tokens.
+    """
     llm = get_llm()
     
     if chat_history is None:
         chat_history = []
     
-    from .github_service import format_file_structure, format_file_contents
+    from .github_service import format_file_structure
     
     components = extract_detailed_repo_components(repo_data)
-    
-    # Build ultra-comprehensive context
+    file_count = len(components['all_files'])
+    min_nodes = max(15, file_count // 2)
+
+    # ✅ FIX: Build file contents with token cap BEFORE assembling the full context
+    file_contents_section = build_trimmed_file_contents(repo_data)
+
+    # Build the folder/component summary (this is compact, no cap needed)
+    def fmt_list(items, limit=30):
+        shown = items[:limit]
+        s = '\n'.join('   - ' + f for f in shown)
+        if len(items) > limit:
+            s += f'\n   ... and {len(items) - limit} more'
+        return s or '   (none)'
+
     context = f"""
 ==============================================================================
-REPOSITORY ANALYSIS - YOU MUST USE ALL THIS DATA TO CREATE COMPREHENSIVE DIAGRAMS
+REPOSITORY ANALYSIS
 ==============================================================================
 
 Repository: {repo_data.get('name', 'Unknown')}
 Language: {repo_data.get('language', 'Unknown')}
-Total Files: {len(components['all_files'])}
+Total Files: {file_count}
 Stars: {repo_data.get('stars', 0)} | Forks: {repo_data.get('forks', 0)}
+Description: {repo_data.get('description', 'N/A')}
 
 ==============================================================================
-COMPLETE FILE STRUCTURE (USE ALL OF THIS):
+FILE STRUCTURE:
 ==============================================================================
 {format_file_structure(repo_data.get('file_structure', {}))}
 
 ==============================================================================
-CATEGORIZED COMPONENTS (INCLUDE ALL IN DIAGRAM):
+CATEGORIZED COMPONENTS:
 ==============================================================================
 
-📁 ALL FOLDERS ({len(components['folders'])} total):
-{chr(10).join('   - ' + f for f in components['folders'])}
+📁 FOLDERS ({len(components['folders'])}):
+{fmt_list(components['folders'])}
 
-📄 ALL FILES ({len(components['all_files'])} total):
-{chr(10).join('   - ' + f for f in components['all_files'][:50])}
-
-🎨 FRONTEND FILES ({len(components['frontend_files'])}):
-{chr(10).join('   - ' + f for f in components['frontend_files'])}
-
-⚙️ BACKEND FILES ({len(components['backend_files'])}):
-{chr(10).join('   - ' + f for f in components['backend_files'])}
-
-🔧 SERVICES ({len(components['services'])}):
-{chr(10).join('   - ' + f for f in components['services'])}
-
-🛣️ ROUTES/API ({len(components['routes'])}):
-{chr(10).join('   - ' + f for f in components['routes'])}
-
-📊 MODELS ({len(components['models'])}):
-{chr(10).join('   - ' + f for f in components['models'])}
-
-🧩 COMPONENTS ({len(components['components'])}):
-{chr(10).join('   - ' + f for f in components['components'])}
-
-📄 PAGES ({len(components['pages'])}):
-{chr(10).join('   - ' + f for f in components['pages'])}
-
-🛠️ UTILITIES ({len(components['utils'])}):
-{chr(10).join('   - ' + f for f in components['utils'])}
-
-⚙️ CONFIG FILES ({len(components['config_files'])}):
-{chr(10).join('   - ' + f for f in components['config_files'])}
-
-💾 DATABASE FILES ({len(components['database_files'])}):
-{chr(10).join('   - ' + f for f in components['database_files'])}
+🎨 FRONTEND ({len(components['frontend_files'])}): {fmt_list(components['frontend_files'])}
+⚙️ BACKEND ({len(components['backend_files'])}): {fmt_list(components['backend_files'])}
+🔧 SERVICES ({len(components['services'])}): {fmt_list(components['services'])}
+🛣️ ROUTES ({len(components['routes'])}): {fmt_list(components['routes'])}
+📊 MODELS ({len(components['models'])}): {fmt_list(components['models'])}
+🧩 COMPONENTS ({len(components['components'])}): {fmt_list(components['components'])}
+📄 PAGES ({len(components['pages'])}): {fmt_list(components['pages'])}
+🛠️ UTILS ({len(components['utils'])}): {fmt_list(components['utils'])}
+💾 DATABASE ({len(components['database_files'])}): {fmt_list(components['database_files'])}
 
 ==============================================================================
-FILE CONTENTS (ACTUAL CODE):
+FILE CONTENTS (top {MAX_FILES_IN_PROMPT} most important files):
 ==============================================================================
-{format_file_contents(repo_data.get('file_contents', {}))}
-
-==============================================================================
-MANDATORY DIAGRAM REQUIREMENTS - YOU MUST FOLLOW:
-==============================================================================
-
-1. COMPREHENSIVENESS (NON-NEGOTIABLE):
-   • Include MINIMUM {max(20, len(components['all_files']) // 2)} components
-   • Show ALL folders as subgraphs
-   • Include ALL major files listed above
-   • Don't skip any important files
-   • Use actual filenames - NO GENERIC NAMES
-
-2. ORGANIZATION (REQUIRED):
-   • Use subgraphs for each major folder
-   • Group related files together
-   • Show clear hierarchy
-   • Include external dependencies
-
-3. SYNTAX (STRICT):
-   • Node IDs: ONLY letters, numbers, underscores (NO SPACES)
-   • Arrows: ONLY --> or -.-> or ==>
-   • Use [DIAGRAM_START] before diagram
-   • Use [DIAGRAM_END] after diagram
-   • NO markdown code blocks
-
-4. QUALITY STANDARDS:
-   Small repos (< 20 files): minimum 15-20 nodes
-   Medium repos (20-50 files): minimum 25-35 nodes
-   Large repos (50+ files): minimum 35-50 nodes
-   
-   This repo has {len(components['all_files'])} files - your diagram MUST include
-   at least {max(15, len(components['all_files']) // 2)} components.
-
-5. FORBIDDEN (DO NOT DO):
-   ✗ Generic names like "Service", "Component", "Module"
-   ✗ Placeholder nodes
-   ✗ Incomplete diagrams
-   ✗ Skipping major files or folders
-   ✗ Made-up filenames
+{file_contents_section}
 
 ==============================================================================
-EXAMPLE OF COMPREHENSIVE DIAGRAM:
+README:
+==============================================================================
+{repo_data.get('readme', '')[:5000]}
+
+==============================================================================
+DIAGRAM REQUIREMENTS:
 ==============================================================================
 
-[DIAGRAM_START]
-flowchart TB
-    subgraph Frontend["🎨 Frontend"]
-        subgraph Pages["pages/"]
-            chat_page["chat_interface.py"]
-            history_page["diagram_history.py"]
-            quick_page["quick_diagrams.py"]
-        end
-        
-        subgraph Components["components/"]
-            mermaid_comp["mermaid_renderer.py"]
-            sidebar_comp["sidebar.py"]
-            voice_comp["voice_input.py"]
-            theme_comp["theme_manager.py"]
-        end
-        
-        subgraph FrontendUtils["utils/"]
-            state_util["state_manager.py"]
-            helpers_util["helpers.py"]
-        end
-    end
-    
-    subgraph Backend["⚙️ Backend"]
-        subgraph Routes["routes/"]
-            chat_route["chat_routes.py"]
-            diagram_route["diagram_routes.py"]
-        end
-        
-        subgraph Services["services/"]
-            llm_svc["llm_service.py"]
-            github_svc["github_service.py"]
-            prompt_svc["prompt_templates.py"]
-        end
-        
-        models_file["models.py"]
-        main_file["main.py"]
-        config_file["config.py"]
-    end
-    
-    subgraph External["🌐 External"]
-        github_api["GitHub API"]
-        openai_api["OpenAI GPT-4"]
-        mermaid_api["Mermaid.ink"]
-    end
-    
-    %% Connections (30+ connections for comprehensive view)
-    chat_page-->chat_route
-    chat_page-->mermaid_comp
-    chat_page-->voice_comp
-    chat_page-->sidebar_comp
-    history_page-->diagram_route
-    quick_page-->diagram_route
-    
-    mermaid_comp-->mermaid_api
-    sidebar_comp-->theme_comp
-    chat_page-->state_util
-    history_page-->state_util
-    
-    chat_route-->llm_svc
-    diagram_route-->llm_svc
-    llm_svc-->github_svc
-    llm_svc-->prompt_svc
-    llm_svc-->openai_api
-    
-    github_svc-->github_api
-    main_file-->chat_route
-    main_file-->diagram_route
-    config_file-->llm_svc
-    config_file-->github_svc
-[DIAGRAM_END]
-
-NOW CREATE YOUR COMPREHENSIVE DIAGRAM USING ALL THE DATA ABOVE!
+1. Include minimum {min_nodes} components (this repo has {file_count} files)
+2. Use subgraphs for each major folder
+3. Use actual filenames - NO generic names like "Service" or "Component"
+4. Node IDs: ONLY letters, numbers, underscores (no spaces)
+5. Arrows: ONLY --> or -.-> or ==>
+6. Wrap diagram in [DIAGRAM_START] ... [DIAGRAM_END]
+7. NO markdown code blocks inside the diagram tags
 """
-    
+
+    # Sanity check: warn if still large (shouldn't happen now)
+    if len(context) > MAX_CONTEXT_CHARS:
+        print(f"   ⚠️ Context still large ({len(context):,} chars) - truncating")
+        context = context[:MAX_CONTEXT_CHARS] + "\n\n[CONTEXT TRUNCATED TO FIT TOKEN LIMIT]"
+
     messages = [SystemMessage(content=context)]
     
-    for msg in chat_history[-10:]:
+    for msg in chat_history[-6:]:  # ✅ reduced from -10 to save tokens
         role = msg.get('role', '')
         content = msg.get('content', '')
-        
         if role == 'user':
             messages.append(HumanMessage(content=content))
         elif role == 'assistant':
-            messages.append(AIMessage(content=content))
+            # Truncate old AI messages - they can be huge
+            messages.append(AIMessage(content=content[:2000]))
     
     messages.append(HumanMessage(content=question))
     
-    # Retry with enforcement
     max_retries = 3
     attempt = 0
+    answer = ""
     
     while attempt < max_retries:
         try:
@@ -418,46 +333,20 @@ NOW CREATE YOUR COMPREHENSIVE DIAGRAM USING ALL THE DATA ABOVE!
             
             if mermaid_code:
                 mermaid_code = fix_mermaid_syntax(mermaid_code)
-                
-                # Validate syntax
                 is_valid_syntax, syntax_errors = validate_mermaid_syntax(mermaid_code)
-                
-                # Validate completeness
                 is_complete, completeness_issues = validate_diagram_completeness(mermaid_code, repo_data)
                 
                 if not is_valid_syntax and attempt < max_retries - 1:
                     print(f"   ❌ Syntax errors: {syntax_errors}")
-                    error_msg = f"""
-SYNTAX ERRORS FOUND: {', '.join(syntax_errors[:3])}
-
-FIX THESE ISSUES:
-1. Check node IDs - use underscores, no spaces
-2. Use only --> or -.-> or ==> for arrows
-3. Balance all brackets, parentheses, braces
-
-REGENERATE with correct syntax.
-"""
-                    messages.append(AIMessage(content=answer_text))
-                    messages.append(HumanMessage(content=error_msg))
+                    messages.append(AIMessage(content=answer_text[:1000]))
+                    messages.append(HumanMessage(content=f"SYNTAX ERRORS: {', '.join(syntax_errors[:3])}. Fix node IDs (no spaces, use underscores) and bracket matching. Regenerate."))
                     attempt += 1
                     continue
                 
                 if not is_complete and attempt < max_retries - 1:
-                    print(f"   ⚠️ Incompleteness issues: {completeness_issues}")
-                    error_msg = f"""
-DIAGRAM TOO SIMPLE: {', '.join(completeness_issues)}
-
-YOU MUST:
-1. Include at least {max(20, len(components['all_files']) // 2)} components
-2. Use subgraphs for all major folders
-3. Include ALL services, routes, pages, components listed
-4. Show ALL major connections
-5. Use REAL filenames from the repository data
-
-REGENERATE with COMPREHENSIVE, detailed diagram including 30-50 components.
-"""
-                    messages.append(AIMessage(content=answer_text))
-                    messages.append(HumanMessage(content=error_msg))
+                    print(f"   ⚠️ Incompleteness: {completeness_issues}")
+                    messages.append(AIMessage(content=answer_text[:1000]))
+                    messages.append(HumanMessage(content=f"DIAGRAM TOO SIMPLE: {', '.join(completeness_issues)}. Include at least {min_nodes} components with subgraphs. Use real filenames. Regenerate."))
                     attempt += 1
                     continue
                 
@@ -475,13 +364,28 @@ REGENERATE with COMPREHENSIVE, detailed diagram including 30-50 components.
             }
         
         except Exception as e:
-            print(f"   ❌ Error: {str(e)}")
+            err = str(e)
+            print(f"   ❌ Error: {err}")
+            
+            # ✅ FIX: If it's a context length error, trim harder and retry once
+            if "context_length_exceeded" in err or "maximum context length" in err:
+                if attempt < max_retries - 1:
+                    print(f"   🔪 Context too long - aggressively trimming for retry...")
+                    # Rebuild with much smaller file section
+                    reduced_contents = build_trimmed_file_contents(repo_data, max_chars=80_000, max_files=15)
+                    # Replace the file contents section in context
+                    trimmed_context = context.split("FILE CONTENTS")[0]
+                    trimmed_context += f"FILE CONTENTS (reduced due to token limit):\n==============================================================================\n{reduced_contents}"
+                    messages[0] = SystemMessage(content=trimmed_context)
+                    attempt += 1
+                    continue
+            
             if attempt < max_retries - 1:
                 attempt += 1
                 continue
             
             return {
-                "answer": f"Error: {str(e)}",
+                "answer": f"Error generating response: {err}",
                 "mermaid_code": None,
                 "diagram_type": None,
                 "has_diagram": False,
@@ -490,7 +394,7 @@ REGENERATE with COMPREHENSIVE, detailed diagram including 30-50 components.
             }
     
     return {
-        "answer": answer if 'answer' in locals() else "Unable to generate diagram",
+        "answer": answer if answer else "Unable to generate response",
         "mermaid_code": None,
         "diagram_type": None,
         "has_diagram": False,
@@ -509,19 +413,12 @@ def clean_mermaid_code(mermaid_code: str) -> str:
 def detect_diagram_type(mermaid_code: str) -> str:
     """Detect the type of Mermaid diagram"""
     code_lower = mermaid_code.lower().strip()
-    
-    if code_lower.startswith("sequencediagram"):
-        return "sequence"
-    elif code_lower.startswith(("flowchart", "graph")):
-        return "flowchart"
-    elif code_lower.startswith("classdiagram"):
-        return "class"
-    elif code_lower.startswith("erdiagram"):
-        return "database"
-    elif code_lower.startswith("statediagram"):
-        return "state"
-    else:
-        return "custom"
+    if code_lower.startswith("sequencediagram"): return "sequence"
+    elif code_lower.startswith(("flowchart", "graph")): return "flowchart"
+    elif code_lower.startswith("classdiagram"): return "class"
+    elif code_lower.startswith("erdiagram"): return "database"
+    elif code_lower.startswith("statediagram"): return "state"
+    else: return "custom"
 
 def extract_diagram_from_response(response_text: str) -> tuple:
     """Extract diagram code from chat response"""
@@ -534,12 +431,9 @@ def extract_diagram_from_response(response_text: str) -> tuple:
             start_idx = answer.index("[DIAGRAM_START]") + len("[DIAGRAM_START]")
             end_idx = answer.index("[DIAGRAM_END]")
             raw_code = answer[start_idx:end_idx].strip()
-            
             mermaid_code = clean_mermaid_code(raw_code)
             diagram_type = detect_diagram_type(mermaid_code)
-            
             answer = answer[:answer.index("[DIAGRAM_START]")].strip()
-            
         except Exception as e:
             print(f"Error extracting diagram: {e}")
             mermaid_code = None
@@ -549,14 +443,12 @@ def extract_diagram_from_response(response_text: str) -> tuple:
 
 def generate_follow_up_questions(answer: str, has_diagram: bool, diagram_type: str = None) -> list:
     """Generate contextual follow-up questions"""
-    
     if has_diagram:
         return [
             "Add more implementation details to the diagram",
             "Show error handling and edge cases",
             "Include deployment and infrastructure"
         ]
-    
     return [
         "Create a comprehensive architecture diagram",
         "Show complete data flow with all components",
