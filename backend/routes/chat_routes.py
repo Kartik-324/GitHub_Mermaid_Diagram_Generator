@@ -125,14 +125,4 @@ async def chat_with_repo(
     except HTTPException:
         # Re-raise HTTP exceptions as-is
         raise
-    except Exception as e:
-        print(f"\n{'='*60}")
-        print(f"❌ UNEXPECTED ERROR")
-        print(f"{'='*60}")
-        print(traceback.format_exc())
-        print(f"{'='*60}\n")
-        
-        raise HTTPException(
-            status_code=500,
-            detail=f"An unexpected error occurred: {str(e)}"
-        )
+    
